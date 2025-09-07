@@ -1,42 +1,93 @@
-import fs from 'fs';
-import { cloudinary } from '../utils/cloudinary.js';
-import Report from '../models/Report.js'; // assuming path
+import fs from "fs";
+import { cloudinary } from "../utils/cloudinary.js";
+import Report from "../models/Report.js"; // assuming path
+import nodemailer from "nodemailer";
+import User from "../models/User.js";
+
+const CATEGORY_ROLES = {
+  security: ["theft", "assault", "vandalism", "unauthorized", "protest"],
+  medical: ["medical"],
+  special: ["fire", "environmental", "substance"],
+};
 
 export const createReport = async (req, res) => {
   try {
     const {
       title,
       description,
-      category,
-      location,
+      categories,
+      area,
+      locationDescription,
       anonymous,
-      latitude,
-      longitude,
       image,
     } = req.body;
 
-    // 👇 This comes from protect middleware (decoded JWT)
     const userId = req.user?._id;
-
     if (!userId) {
-      return res.status(401).json({ success: false, message: "User not authenticated" });
+      return res
+        .status(401)
+        .json({ success: false, message: "User not authenticated" });
     }
 
+    // 1️⃣ Create report
     const newReport = await Report.create({
       title,
       description,
-      category,
-      location,
-      anonymous: anonymous === true || anonymous === "true", // handle boolean/string
-      latitude,
-      longitude,
+      category: categories,
+      area,
+      locationDescription,
+      anonymous: anonymous === true || anonymous === "true",
       image,
-      createdBy: userId, // 👈 set creator
+      createdBy: userId,
     });
+
+    // 2️⃣ Collect recipients
+    let recipientRoles = new Set(["admin"]); // admins always notified
+
+    categories.forEach((cat) => {
+      for (const role in CATEGORY_ROLES) {
+        if (CATEGORY_ROLES[role].includes(cat)) {
+          recipientRoles.add(role);
+        }
+      }
+    });
+
+    const usersToNotify = await User.find({
+      role: { $in: Array.from(recipientRoles) },
+    });
+
+    // 3️⃣ Send emails
+    if (usersToNotify.length > 0) {
+      const transporter = nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: process.env.MAIL_USER,
+          pass: process.env.MAIL_PASS,
+        },
+      });
+
+      await Promise.all(
+        usersToNotify.map((user) =>
+          transporter.sendMail({
+            from: `"Campus Security" <${process.env.MAIL_USER}>`,
+            to: user.email,
+            subject: "🚨 New Security Incident Reported",
+            html: `
+              <h3>New Report Submitted</h3>
+              <p><strong>Title:</strong> ${title}</p>
+              <p><strong>Categories:</strong> ${categories.join(", ")}</p>
+              <p><strong>Area:</strong> ${area}</p>
+              <p><strong>Location:</strong> ${locationDescription}</p>
+              <p><strong>Description:</strong> ${description}</p>
+            `,
+          })
+        )
+      );
+    }
 
     return res.json({
       success: true,
-      message: "Report submitted",
+      message: "Report submitted and relevant staff notified",
       report: newReport,
     });
   } catch (error) {
@@ -51,61 +102,86 @@ export const updateReport = async (req, res) => {
     const {
       title,
       description,
-      category,
-      location,
-      anonymous = 'false',
-      latitude,
-      longitude
+      categories,
+      status,
+      area,
+      locationDescription,
     } = req.body;
 
-    const existing = await Report.findById(id);
-    if (!existing) {
-      return res.status(404).json({ status: 'error', message: 'Report not found' });
+    // 1️⃣ Update the report
+    const report = await Report.findByIdAndUpdate(
+      id,
+      {
+        title,
+        description,
+        category: categories,
+        status,
+        area,
+        locationDescription,
+      },
+      { new: true }
+    );
+
+    if (!report) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Report not found" });
     }
 
-    let imageUrl = '';
-    if (req.file?.path) {
-      const result = await cloudinary.uploader.upload(req.file.path, {
-        folder: 'security-reports',
-        resource_type: 'image',
-        public_id: `report-${Date.now()}`
+    // 2️⃣ Collect recipient roles
+    let recipientRoles = new Set(["admin"]); // always notify admins
+
+    categories.forEach((cat) => {
+      for (const role in CATEGORY_ROLES) {
+        if (CATEGORY_ROLES[role].includes(cat)) {
+          recipientRoles.add(role);
+        }
+      }
+    });
+
+    const usersToNotify = await User.find({
+      role: { $in: Array.from(recipientRoles) },
+    });
+
+    // 3️⃣ Send emails
+    if (usersToNotify.length > 0) {
+      const transporter = nodemailer.createTransport({
+        service: "gmail",
+        auth: {
+          user: process.env.MAIL_USER,
+          pass: process.env.MAIL_PASS,
+        },
       });
-      imageUrl = result.secure_url;
-      fs.existsSync(req.file.path) && fs.unlinkSync(req.file.path);
+
+      await Promise.all(
+        usersToNotify.map((user) =>
+          transporter.sendMail({
+            from: `"Campus Security" <${process.env.MAIL_USER}>`,
+            to: user.email,
+            subject: "⚠️ Incident Report Updated",
+            html: `
+              <h3>Incident Report Updated</h3>
+              <p><strong>Title:</strong> ${report.title}</p>
+              <p><strong>Categories:</strong> ${report.category.join(", ")}</p>
+              <p><strong>Status:</strong> ${report.status}</p>
+              <p><strong>Area:</strong> ${report.area}</p>
+              <p><strong>Location:</strong> ${report.locationDescription}</p>
+              <p><strong>Description:</strong> ${report.description}</p>
+              <p><em>This report has been updated. Please review the changes.</em></p>
+            `,
+          })
+        )
+      );
     }
 
-    if (title !== undefined) existing.title = title;
-    if (description !== undefined) existing.description = description;
-    if (category !== undefined) existing.category = category;
-    if (location !== undefined) existing.location = location;
-
-    if (latitude && longitude) {
-      existing.gpsCoordinates = {
-        latitude: parseFloat(latitude),
-        longitude: parseFloat(longitude),
-      };
-    } else if (!latitude && !longitude && existing.gpsCoordinates && (latitude !== undefined || longitude !== undefined)) {
-      // Optional: allow clearing coords when both are empty strings
-      existing.gpsCoordinates = null;
-    }
-
-    existing.anonymous = String(anonymous) === 'true';
-
-    if (imageUrl) {
-      // Replace or append: here we replace the first image (same as create behavior)
-      existing.images = [imageUrl];
-    }
-
-    await existing.save();
-    await existing.populate('createdBy', 'name email');
-
-    res.json({ status: 'success', data: existing });
+    return res.json({
+      success: true,
+      message: "Report updated and relevant staff notified",
+      report,
+    });
   } catch (error) {
-    if (req.file?.path && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
-    console.error('Error updating report:', error);
-    res.status(400).json({ status: 'error', message: error.message });
+    console.error("Error updating report:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -115,23 +191,23 @@ export const trendingReport = async (req, res) => {
 
   try {
     const incidents = await Report.find()
-      .populate('createdBy', 'name')
+      .populate("createdBy", "name")
       .sort({ createdAt: -1 })
       .limit(5);
-    
+
     console.log("trending incidents = ", incidents);
-    
+
     res.status(200).json({
-      status: 'success',
+      status: "success",
       data: {
-        incidents
-      }
+        incidents,
+      },
     });
   } catch (error) {
     console.log("incident error = ", error);
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };
@@ -140,36 +216,36 @@ export const trendingReport = async (req, res) => {
 export const getAllReport = async (req, res) => {
   try {
     const { category, status, page = 1, limit = 10 } = req.query;
-    
+
     // Build filter object
     const filter = {};
-    if (category && category !== 'all') filter.category = category;
-    if (status && status !== 'all') filter.status = status;
-    
+    if (category && category !== "all") filter.category = category;
+    if (status && status !== "all") filter.status = status;
+
     // Execute query with pagination
     const reports = await Report.find(filter)
-      .populate('createdBy', 'name email')
-      .populate('assignedTo', 'name')
+      .populate("createdBy", "name email")
+      .populate("assignedTo", "name")
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
-    
+
     // Get total documents count
     const total = await Report.countDocuments(filter);
-    
+
     res.status(200).json({
-      status: 'success',
+      status: "success",
       data: {
         reports,
         totalPages: Math.ceil(total / limit),
         currentPage: page,
-        total
-      }
+        total,
+      },
     });
   } catch (error) {
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };
@@ -178,18 +254,18 @@ export const getAllReport = async (req, res) => {
 export const getUserReport = async (req, res) => {
   try {
     const reports = await Report.find({ createdBy: req.user.id })
-      .populate('createdBy', 'name email')
-      .populate('assignedTo', 'name')
+      .populate("createdBy", "name email")
+      .populate("assignedTo", "name")
       .sort({ createdAt: -1 });
-    
+
     res.status(200).json({
-      status: 'success',
-      data: reports
+      status: "success",
+      data: reports,
     });
   } catch (error) {
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };
@@ -197,40 +273,40 @@ export const getUserReport = async (req, res) => {
 export const getReportStat = async (req, res) => {
   try {
     let query = {};
-    
+
     // For non-admin users, only show their own stats
-    if (req.user.role === 'student') {
+    if (req.user.role === "student") {
       query.createdBy = req.user.id;
     }
-    
+
     // Get all matching reports
     const reports = await Report.find(query);
-    
+
     // Manually calculate statistics
     const stats = {
       total: reports.length,
-      pending: reports.filter(r => r.status === 'pending').length,
-      inProgress: reports.filter(r => r.status === 'in-progress').length,
-      resolved: reports.filter(r => r.status === 'resolved').length,
-      referred: reports.filter(r => r.status === 'referred').length,
+      pending: reports.filter((r) => r.status === "pending").length,
+      inProgress: reports.filter((r) => r.status === "in-progress").length,
+      resolved: reports.filter((r) => r.status === "resolved").length,
+      referred: reports.filter((r) => r.status === "referred").length,
       byCategory: {}, // ✅ added
     };
 
     // Build category breakdown
-    reports.forEach(r => {
-      const cat = r.category || 'uncategorized';
+    reports.forEach((r) => {
+      const cat = r.category || "uncategorized";
       stats.byCategory[cat] = (stats.byCategory[cat] || 0) + 1;
     });
-    
+
     res.status(200).json({
-      status: 'success',
-      data: stats
+      status: "success",
+      data: stats,
     });
   } catch (error) {
-    console.error('Error fetching report stats:', error);
+    console.error("Error fetching report stats:", error);
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };
@@ -239,74 +315,75 @@ export const getReportStat = async (req, res) => {
 export const getSingleReport = async (req, res) => {
   try {
     const report = await Report.findById(req.params.id)
-      .populate('createdBy', 'name email')
-      .populate('assignedTo', 'name')
-      .populate('comments.user', 'name');
-    
+      .populate("createdBy", "name email")
+      .populate("assignedTo", "name")
+      .populate("comments.user", "name");
+
     if (!report) {
       return res.status(404).json({
-        status: 'error',
-        message: 'Report not found'
+        status: "error",
+        message: "Report not found",
       });
     }
-    
+
     // Check if user has access to this report
-    if (req.user.role === 'student' && report.createdBy._id.toString() !== req.user.id) {
+    if (
+      req.user.role === "student" &&
+      report.createdBy._id.toString() !== req.user.id
+    ) {
       return res.status(403).json({
-        status: 'error',
-        message: 'Not authorized to access this report'
+        status: "error",
+        message: "Not authorized to access this report",
       });
     }
-    
+
     res.status(200).json({
-      status: 'success',
-      data: report
+      status: "success",
+      data: report,
     });
   } catch (error) {
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };
-
-
 
 // Delete report image
 export const deleteReportImage = async (req, res) => {
   try {
     const { reportId } = req.params;
-    
+
     const report = await Report.findById(reportId);
     if (!report) {
       return res.status(404).json({
-        status: 'error',
-        message: 'Report not found'
+        status: "error",
+        message: "Report not found",
       });
     }
-    
+
     // Delete image from Cloudinary if exists
     if (report.images.length > 0) {
-      const publicId = report.images[0].split('/').pop().split('.')[0];
+      const publicId = report.images[0].split("/").pop().split(".")[0];
       await cloudinary.uploader.destroy(`security-reports/${publicId}`);
     }
-    
+
     // Remove image from report
     const updatedReport = await Report.findByIdAndUpdate(
       reportId,
       { images: [] },
       { new: true }
     );
-    
+
     res.status(200).json({
-      status: 'success',
-      data: updatedReport
+      status: "success",
+      data: updatedReport,
     });
   } catch (error) {
-    console.error('Error deleting image:', error);
+    console.error("Error deleting image:", error);
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };
@@ -314,32 +391,35 @@ export const deleteReportImage = async (req, res) => {
 export const deleteReport = async (req, res) => {
   try {
     const report = await Report.findById(req.params.id);
-    
+
     if (!report) {
       return res.status(404).json({
-        status: 'error',
-        message: 'Report not found'
+        status: "error",
+        message: "Report not found",
       });
     }
-    
+
     // Check if user can delete this report
-    if (req.user.role === 'student' && report.createdBy.toString() !== req.user.id) {
+    if (
+      req.user.role === "student" &&
+      report.createdBy.toString() !== req.user.id
+    ) {
       return res.status(403).json({
-        status: 'error',
-        message: 'Not authorized to delete this report'
+        status: "error",
+        message: "Not authorized to delete this report",
       });
     }
-    
+
     await Report.findByIdAndDelete(req.params.id);
-    
+
     res.status(200).json({
-      status: 'success',
-      data: null
+      status: "success",
+      data: null,
     });
   } catch (error) {
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };
@@ -348,42 +428,45 @@ export const deleteReport = async (req, res) => {
 export const postComment = async (req, res) => {
   try {
     const { text } = req.body;
-    
+
     const report = await Report.findById(req.params.id);
-    
+
     if (!report) {
       return res.status(404).json({
-        status: 'error',
-        message: 'Report not found'
+        status: "error",
+        message: "Report not found",
       });
     }
-    
+
     // Check if user has access to this report
-    if (req.user.role === 'student' && report.createdBy.toString() !== req.user.id) {
+    if (
+      req.user.role === "student" &&
+      report.createdBy.toString() !== req.user.id
+    ) {
       return res.status(403).json({
-        status: 'error',
-        message: 'Not authorized to comment on this report'
+        status: "error",
+        message: "Not authorized to comment on this report",
       });
     }
-    
+
     report.comments.push({
       user: req.user.id,
-      text
+      text,
     });
-    
+
     await report.save();
-    
+
     // Populate the new comment's user field
-    await report.populate('comments.user', 'name');
-    
+    await report.populate("comments.user", "name");
+
     res.status(201).json({
-      status: 'success',
-      data: report
+      status: "success",
+      data: report,
     });
   } catch (error) {
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };
@@ -391,27 +474,27 @@ export const postComment = async (req, res) => {
 // Get report statistics with category breakdown
 export const reportStats = async (req, res) => {
   try {
-    const { range = 'all' } = req.query;
-    
+    const { range = "all" } = req.query;
+
     // Calculate date range
     let dateFilter = {};
-    if (range === 'month') {
+    if (range === "month") {
       const oneMonthAgo = new Date();
       oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
       dateFilter.createdAt = { $gte: oneMonthAgo };
-    } else if (range === 'week') {
+    } else if (range === "week") {
       const oneWeekAgo = new Date();
       oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
       dateFilter.createdAt = { $gte: oneWeekAgo };
     }
-    
+
     let match = { ...dateFilter };
-    
+
     // For non-admin users, only show their own stats
-    if (req.user.role === 'student') {
+    if (req.user.role === "student") {
       match.createdBy = req.user.id;
     }
-    
+
     // Get basic stats
     const stats = await Report.aggregate([
       { $match: match },
@@ -420,59 +503,62 @@ export const reportStats = async (req, res) => {
           _id: null,
           total: { $sum: 1 },
           pending: {
-            $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] }
+            $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
           },
           inProgress: {
-            $sum: { $cond: [{ $eq: ['$status', 'in-progress'] }, 1, 0] }
+            $sum: { $cond: [{ $eq: ["$status", "in-progress"] }, 1, 0] },
           },
           resolved: {
-            $sum: { $cond: [{ $eq: ['$status', 'resolved'] }, 1, 0] }
+            $sum: { $cond: [{ $eq: ["$status", "resolved"] }, 1, 0] },
           },
           referred: {
-            $sum: { $cond: [{ $eq: ['$status', 'referred'] }, 1, 0] }
-          }
-        }
-      }
+            $sum: { $cond: [{ $eq: ["$status", "referred"] }, 1, 0] },
+          },
+        },
+      },
     ]);
-    
+
     // Get category breakdown
     const categoryStats = await Report.aggregate([
       { $match: match },
       {
         $group: {
-          _id: '$category',
-          count: { $sum: 1 }
-        }
+          _id: "$category",
+          count: { $sum: 1 },
+        },
       },
-      { $sort: { count: -1 } }
+      { $sort: { count: -1 } },
     ]);
-    
+
     // Format category stats as an object
     const byCategory = {};
-    categoryStats.forEach(item => {
+    categoryStats.forEach((item) => {
       byCategory[item._id] = item.count;
     });
-    
+
     // If no reports found, return zeros
-    const result = stats.length > 0 ? stats[0] : {
-      total: 0,
-      pending: 0,
-      inProgress: 0,
-      resolved: 0,
-      referred: 0
-    };
-    
+    const result =
+      stats.length > 0
+        ? stats[0]
+        : {
+            total: 0,
+            pending: 0,
+            inProgress: 0,
+            resolved: 0,
+            referred: 0,
+          };
+
     // Add category breakdown to result
     result.byCategory = byCategory;
-    
+
     res.status(200).json({
-      status: 'success',
-      data: result
+      status: "success",
+      data: result,
     });
   } catch (error) {
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };
@@ -481,61 +567,61 @@ export const reportStats = async (req, res) => {
 export const statsTrend = async (req, res) => {
   try {
     const { days = 30 } = req.query;
-    
+
     // Calculate date range
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - parseInt(days));
-    
+
     // Get daily report counts
     const dailyStats = await Report.aggregate([
       {
         $match: {
-          createdAt: { $gte: startDate }
-        }
+          createdAt: { $gte: startDate },
+        },
       },
       {
         $group: {
           _id: {
             $dateToString: {
-              format: '%Y-%m-%d',
-              date: '$createdAt'
-            }
+              format: "%Y-%m-%d",
+              date: "$createdAt",
+            },
           },
-          count: { $sum: 1 }
-        }
+          count: { $sum: 1 },
+        },
       },
-      { $sort: { _id: 1 } }
+      { $sort: { _id: 1 } },
     ]);
-    
+
     // Get status distribution
     const statusStats = await Report.aggregate([
       {
         $match: {
-          createdAt: { $gte: startDate }
-        }
+          createdAt: { $gte: startDate },
+        },
       },
       {
         $group: {
-          _id: '$status',
-          count: { $sum: 1 }
-        }
-      }
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
     ]);
-    
+
     // Format the response
     const trendData = {
       daily: dailyStats,
-      byStatus: statusStats
+      byStatus: statusStats,
     };
-    
+
     res.status(200).json({
-      status: 'success',
-      data: trendData
+      status: "success",
+      data: trendData,
     });
   } catch (error) {
     res.status(500).json({
-      status: 'error',
-      message: error.message
+      status: "error",
+      message: error.message,
     });
   }
 };

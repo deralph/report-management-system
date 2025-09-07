@@ -1,6 +1,6 @@
-import express from 'express';
-import multer from 'multer';
-import { protect, authorize } from '../middlewares/auth.js';
+import express from "express";
+import multer from "multer";
+import { protect, authorize } from "../middlewares/auth.js";
 import {
   getAllReport,
   getUserReport,
@@ -13,40 +13,42 @@ import {
   postComment,
   reportStats,
   deleteReportImage,
-  statsTrend
-} from '../controllers/reportController.js';
+  statsTrend,
+} from "../controllers/reportController.js";
 // import { upload } from '../utils/multer.js'; // <-- disk storage multer
 // import { upload } from '../utils/multer.js'; // <-- disk storage multer
-import path from 'path';
+import path from "path";
 
-const storage = multer.diskStorage({});   
+const storage = multer.diskStorage({});
 const upload = multer({ storage });
-
 
 // Enhanced report route to handle image uploads
 
 const router = express.Router();
 
-
 // Get all reports (for admin with filtering)
-router.get('/', protect, authorize('admin', 'security', 'medical', 'special'), getAllReport);
+router.get(
+  "/",
+  protect,
+  authorize("admin", "security", "medical", "special"),
+  getAllReport
+);
 
 // Get user's reports
-router.get('/my-reports', protect, getUserReport);
+router.get("/my-reports", protect, getUserReport);
 
 // Get report statistics
-router.get('/stats', protect, getReportStat);
+router.get("/stats", protect, getReportStat);
 
 // create/update with disk storage -> cloudinary in controller
-router.post('/', protect, createReport);
-router.put('/:id',  upload.single('image'), updateReport);
+router.post("/", protect, createReport);
+router.put("/:id", protect, updateReport);
 
 // Delete report image
-router.delete('/:reportId/image', protect, deleteReportImage);
-
+router.delete("/:reportId/image", protect, deleteReportImage);
 
 // Get single report
-router.get('/:id', protect, getSingleReport);
+router.get("/:id", protect, getSingleReport);
 
 // Create new report with file upload
 // router.post('/', protect, upload.array('images', 5), createReport);
@@ -55,15 +57,15 @@ router.get('/:id', protect, getSingleReport);
 // router.put('/:id', protect, upload.array('images', 5), updateReport);
 
 // Delete report
-router.delete('/:id', protect, deleteReport);
+router.delete("/:id", protect, deleteReport);
 
 // Add comment to report
-router.post('/:id/comments', protect, postComment);
+router.post("/:id/comments", protect, postComment);
 
 // Additional endpoint for trend data
-router.get('/stats/trend', protect, authorize('admin', 'security'), statsTrend);
+router.get("/stats/trend", protect, authorize("admin", "security"), statsTrend);
 
 // Get trending incidents
-router.get('/trending/incidents', protect, trendingReport);
+router.get("/trending/incidents", protect, trendingReport);
 
 export default router;

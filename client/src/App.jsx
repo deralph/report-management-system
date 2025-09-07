@@ -7,8 +7,8 @@ import {
   Navigate,
 } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
-import Login from "./components/Auth/Login";
-import Register from "./components/Auth/Register";
+import UserAuth from "./components/Auth/User";
+import AdminAuth from "./components/Auth/Admin";
 import StudentDashboard from "./components/Dashboard/StudentDashboard";
 import AdminDashboard from "./components/Dashboard/AdminDashboard";
 import ReportForm from "./components/Reports/ReportForm";
@@ -38,8 +38,8 @@ function App() {
         <div className="App min-h-screen bg-gray-100">
           <Navbar />
           <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/register" element={<Register />} />
+            <Route path="/login" element={<UserAuth />} />
+            <Route path="/admin-login" element={<AdminAuth />} />
             <Route
               path="/dashboard"
               element={
