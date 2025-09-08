@@ -45,7 +45,7 @@ const ReportView = () => {
     if (user.role !== "admin" && user.role !== "security") return;
 
     try {
-      await api.put(`/api/reports/${id}`, { status: newStatus });
+      await api.put(`/api/reports/${id}`, { ...report, status: newStatus });
       await fetchReport();
     } catch (error) {
       console.error("Error updating report status:", error);

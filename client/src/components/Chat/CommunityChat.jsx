@@ -1,12 +1,15 @@
+// client/src/components/CommunityChat.jsx
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import io from "socket.io-client";
 import { useAuth } from "../../context/AuthContext";
 
-// A polished, modern Community Chat component using Tailwind + Framer Motion.
-// - Removed trending/incidents sidebar per request.
-// - Focused on an Instagram/Facebook-like aesthetic: gradients, soft shadows, rounded bubbles, avatars, and a luxe input bar.
-// - Export default component ready to drop into your project. You may tweak colors or animations.
+// CommunityChat (UI unchanged). Fixes:
+// - dedupe messages properly (no duplicates when sending)
+// - double-click / double-tap opens emoji picker (choose reaction)
+// - single left-click -> reply
+// - long-press (mobile) / right-click -> open emoji picker
+// - swipe-right -> reply
 
 export default function CommunityChat() {
   const { user, api } = useAuth();
@@ -17,8 +20,21 @@ export default function CommunityChat() {
   const [error, setError] = useState("");
   const [typingUsers, setTypingUsers] = useState([]);
 
+  // UI state
+  const [replyingTo, setReplyingTo] = useState(null); // message object
+  const [openReactionFor, setOpenReactionFor] = useState(null); // message id which has the emoji picker open
+
   const socketRef = useRef(null);
   const endRef = useRef(null);
+
+  // gestures / click timing
+  const touchStartX = useRef(0);
+  const touchCurrentX = useRef(0);
+  const longPressTimer = useRef(null);
+  const lastTapRef = useRef({ id: null, time: 0 });
+  const clickTimeoutRef = useRef(null);
+
+  const EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 
   const getUserName = (m) => {
     if (!m) return "Unknown";
@@ -38,6 +54,44 @@ export default function CommunityChat() {
     return name ? name.charAt(0).toUpperCase() : "U";
   };
 
+  // -----------------------
+  // addOrReplaceMessage helper (dedupe & replace optimistic)
+  // -----------------------
+  const addOrReplaceMessage = useCallback((incoming) => {
+    setMessages((prev) => {
+      const incomingId = String(incoming._id);
+      // 1) If there's an exact id match, replace it
+      const exactIdx = prev.findIndex((m) => String(m._id) === incomingId);
+      if (exactIdx > -1) {
+        const copy = [...prev];
+        copy[exactIdx] = { ...copy[exactIdx], ...incoming };
+        return copy;
+      }
+
+      // 2) Otherwise, try to find an optimistic temp message to replace:
+      //    match on temp id pattern + identical text + same userId + same replyTo (if any)
+      const optimisticIdx = prev.findIndex((m) => {
+        const idStr = String(m._id || "");
+        if (!idStr.startsWith("temp-")) return false;
+        if (String(m.userId) !== String(incoming.userId)) return false;
+        if ((m.text || "") !== (incoming.text || "")) return false;
+        const mReply = m.replyTo ? String(m.replyTo._id || m.replyTo) : null;
+        const inReply = incoming.replyTo
+          ? String(incoming.replyTo._id || incoming.replyTo)
+          : null;
+        return mReply === inReply;
+      });
+      if (optimisticIdx > -1) {
+        const copy = [...prev];
+        copy[optimisticIdx] = { ...copy[optimisticIdx], ...incoming };
+        return copy;
+      }
+
+      // 3) No match -> append
+      return [...prev, incoming];
+    });
+  }, []);
+
   // --- Websocket connect ---
   const connect = useCallback(() => {
     try {
@@ -52,18 +106,22 @@ export default function CommunityChat() {
         setError("");
       });
 
+      // Server broadcasts incoming messages here
       s.on("receive-message", (message) => {
-        setMessages((prev) => {
-          const exists = prev.some(
-            (msg) =>
-              msg._id === message._id ||
-              (msg.text === message.text &&
-                getUserId(msg) === getUserId(message) &&
-                msg.timestamp === message.timestamp)
-          );
-          if (!exists) return [...prev, message];
-          return prev;
-        });
+        // use helper to avoid duplicates
+        addOrReplaceMessage(message);
+      });
+
+      s.on("message-reaction-updated", ({ messageId, reactions }) => {
+        setMessages((prev) =>
+          prev.map((m) =>
+            String(m._id) === String(messageId) ? { ...m, reactions } : m
+          )
+        );
+      });
+
+      s.on("message-updated", (message) => {
+        addOrReplaceMessage(message);
       });
 
       s.on("user-typing", ({ userId, isTyping }) => {
@@ -86,12 +144,16 @@ export default function CommunityChat() {
       console.error("Socket init error", err);
       setError("Failed to connect to chat server");
     }
-  }, []);
+  }, [addOrReplaceMessage]);
 
   useEffect(() => {
     connect();
     fetchMessages();
-    return () => socketRef.current?.disconnect();
+    return () => {
+      socketRef.current?.disconnect();
+      clearTimeout(longPressTimer.current);
+      clearTimeout(clickTimeoutRef.current);
+    };
   }, [connect]);
 
   useEffect(() => {
@@ -111,29 +173,66 @@ export default function CommunityChat() {
     }
   };
 
+  // -----------------------
+  // sendMessage (optimistic + ack replacement)
+  // -----------------------
   const sendMessage = async () => {
     if (!newMessage.trim()) return;
     const payload = { userId: user._id, text: newMessage.trim() };
+    if (replyingTo) payload.replyTo = replyingTo._id;
     setNewMessage("");
+    setReplyingTo(null);
+
+    const tempId = `temp-${Date.now()}`;
+    const optimisticMsg = {
+      _id: tempId,
+      user: user.name || user.username || "You",
+      userId: user._id,
+      text: payload.text,
+      replyTo: replyingTo
+        ? {
+            _id: replyingTo._id,
+            text: replyingTo.text,
+            user: replyingTo.user,
+            userId: getUserId(replyingTo),
+          }
+        : undefined,
+      timestamp: new Date().toISOString(),
+      reactions: [],
+    };
+
+    // add optimistic message (use helper to avoid doubles)
+    addOrReplaceMessage(optimisticMsg);
 
     if (socketRef.current?.connected) {
-      socketRef.current.emit("send-message", payload);
+      socketRef.current.emit("send-message", payload, (ack) => {
+        if (ack?.success && ack.message) {
+          // replace optimistic if present (helper will do that)
+          addOrReplaceMessage(ack.message);
+        }
+      });
     } else {
       try {
-        await api.post("/api/chat/messages", { text: payload.text });
-        fetchMessages();
+        const res = await api.post("/api/chat/messages", payload);
+        const saved = res?.data?.data?.message;
+        if (saved) {
+          addOrReplaceMessage(saved);
+        } else {
+          fetchMessages();
+        }
       } catch (err) {
+        console.error("sendMessage error", err);
         setError("Failed to send message");
       }
     }
   };
 
+  // typing + send on enter
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
-    // notify typing
     if (socketRef.current?.connected) {
       socketRef.current.emit("typing", { userId: user._id, isTyping: true });
       clearTimeout(window.__typingTimeout);
@@ -154,7 +253,104 @@ export default function CommunityChat() {
     }
   };
 
-  // --- Small UI pieces ---
+  // Reactions (optimistic toggle + emit)
+  const reactToMessage = (messageId, emoji) => {
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (String(m._id) !== String(messageId)) return m;
+        const myReactionIndex = (m.reactions || []).findIndex(
+          (r) => String(r.userId) === String(user._id) && r.emoji === emoji
+        );
+        let newReactions = Array.isArray(m.reactions) ? [...m.reactions] : [];
+        if (myReactionIndex > -1) {
+          newReactions.splice(myReactionIndex, 1);
+        } else {
+          newReactions.push({ emoji, userId: user._id });
+        }
+        socketRef.current?.emit("react-message", {
+          messageId,
+          emoji,
+          userId: user._id,
+        });
+        return { ...m, reactions: newReactions };
+      })
+    );
+  };
+
+  // -----------------------
+  // Interaction handlers
+  // -----------------------
+  // Mobile: start touch (start long-press timer for reactions)
+  const onTouchStart = (e, m) => {
+    touchStartX.current = e.touches[0].clientX;
+    touchCurrentX.current = touchStartX.current;
+    longPressTimer.current = setTimeout(() => {
+      setOpenReactionFor(m._id);
+    }, 520);
+  };
+  const onTouchMove = (e) => {
+    touchCurrentX.current = e.touches[0].clientX;
+  };
+  const onTouchEnd = (m) => {
+    clearTimeout(longPressTimer.current);
+    const delta = touchCurrentX.current - touchStartX.current;
+    if (delta > 80) {
+      setReplyingTo(m); // swipe-right -> reply
+    } else {
+      // double-tap detection -> open reaction picker
+      const now = Date.now();
+      const last = lastTapRef.current;
+      if (last.id === m._id && now - last.time < 300) {
+        setOpenReactionFor(m._id); // double-tap -> reactions
+        lastTapRef.current = { id: null, time: 0 };
+      } else {
+        lastTapRef.current = { id: m._id, time: now };
+      }
+    }
+    touchStartX.current = 0;
+    touchCurrentX.current = 0;
+  };
+
+  // Desktop click vs double-click:
+  // single left-click -> reply
+  // double-click -> open reaction picker (choose emoji)
+  const handleClick = (m) => {
+    // schedule single-click after short delay; canceled by double-click
+    clearTimeout(clickTimeoutRef.current);
+    clickTimeoutRef.current = setTimeout(() => {
+      setReplyingTo(m);
+    }, 220);
+  };
+  const handleDoubleClick = (m) => {
+    clearTimeout(clickTimeoutRef.current);
+    setOpenReactionFor(m._id); // double-click -> open reaction picker
+  };
+
+  // right-click opens reaction picker
+  const handleContext = (e, m) => {
+    e.preventDefault();
+    setOpenReactionFor(m._id);
+  };
+
+  // Helper to render reactions inside bubble
+  const renderReactions = (m) => {
+    if (!m.reactions || m.reactions.length === 0) return null;
+    const map = {};
+    m.reactions.forEach((r) => (map[r.emoji] = (map[r.emoji] || 0) + 1));
+    return (
+      <div className="mt-2 inline-flex items-center gap-2 text-xs">
+        {Object.keys(map).map((emoji) => (
+          <div
+            key={emoji}
+            className="px-2 py-1 rounded-full bg-gray-100 text-sm"
+          >
+            {emoji} {map[emoji]}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   const OnlineBadge = () => (
     <div className="flex items-center space-x-2">
       <div
@@ -168,6 +364,9 @@ export default function CommunityChat() {
     </div>
   );
 
+  // -----------------------
+  // Render (UI unchanged)
+  // -----------------------
   return (
     <div className="mx-auto max-w-4xl p-6">
       <div className="rounded-2xl overflow-hidden shadow-2xl border border-gray-800/5 bg-gradient-to-br from-white via-slate-50 to-white">
@@ -204,14 +403,17 @@ export default function CommunityChat() {
         </div>
 
         {/* Body */}
-        <div className="flex flex-col md:flex-row">
+        <div className="flex flex-col md:flex-row ">
           {/* Chat column */}
-          <div className="flex-1 p-6 min-h-[60vh] max-h-[70vh] overflow-hidden">
+          <div className="flex-1 p-6 min-h-[60vh] max-h-[80vh] overflow-hidden">
             <div className="h-full bg-white rounded-xl shadow-inner p-4 flex flex-col">
               {/* messages container */}
               <div
-                className="flex-1 overflow-y-auto space-y-4 pr-2"
-                style={{ paddingBottom: 8 }}
+                className="flex-1 overflow-y-auto space-y-4 pr-2 bg-cover bg-center bg-no-repeat "
+                style={{
+                  backgroundImage: "url('/chatbg.jpg')",
+                  paddingBottom: 8,
+                }}
               >
                 {loading ? (
                   <div className="flex items-center justify-center h-48">
@@ -223,13 +425,13 @@ export default function CommunityChat() {
                   </div>
                 ) : (
                   messages.map((m, i) => {
-                    const mine = getUserId(m) === user._id;
+                    const mine = String(getUserId(m)) === String(user._id);
                     return (
                       <motion.div
-                        key={m._id || i}
+                        key={String(m._id) + "-" + i}
                         initial={{ opacity: 0, y: 6 }}
                         animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.2, delay: i * 0.02 }}
+                        transition={{ duration: 0.18, delay: i * 0.01 }}
                         className={`flex items-end ${
                           mine ? "justify-end" : "justify-start"
                         }`}
@@ -242,7 +444,15 @@ export default function CommunityChat() {
                           </div>
                         )}
 
-                        <div className={`max-w-[78%] break-words`}>
+                        <div
+                          className={`max-w-[78%] break-words relative`}
+                          onTouchStart={(e) => onTouchStart(e, m)}
+                          onTouchMove={onTouchMove}
+                          onTouchEnd={() => onTouchEnd(m)}
+                          onClick={() => handleClick(m)}
+                          onDoubleClick={() => handleDoubleClick(m)}
+                          onContextMenu={(e) => handleContext(e, m)}
+                        >
                           <div
                             className={`px-4 py-3 rounded-2xl ${
                               mine
@@ -255,6 +465,21 @@ export default function CommunityChat() {
                                 : "#f8fafc",
                             }}
                           >
+                            {/* reply preview */}
+                            {m.replyTo && (
+                              <div className="mb-2 p-2 rounded-md bg-white/60 text-xs text-gray-600 border-l-2 border-indigo-200">
+                                <div className="font-semibold text-xs">
+                                  Replying to{" "}
+                                  {m.replyTo.user ||
+                                    m.replyTo.user?.name ||
+                                    "Unknown"}
+                                </div>
+                                <div className="truncate max-w-xs">
+                                  {m.replyTo.text}
+                                </div>
+                              </div>
+                            )}
+
                             <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center gap-3">
                                 {!mine && (
@@ -272,6 +497,7 @@ export default function CommunityChat() {
                                   )}
                                 </div>
                               </div>
+                              <div className="flex items-center gap-2" />
                             </div>
 
                             <div
@@ -281,7 +507,33 @@ export default function CommunityChat() {
                             >
                               {m.text}
                             </div>
+
+                            {renderReactions(m)}
                           </div>
+
+                          {/* Reaction picker popover */}
+                          {openReactionFor === m._id && (
+                            <div className="absolute right-0 top-0 mt-2 bg-white rounded-lg shadow p-2 flex gap-2 z-50">
+                              {EMOJIS.map((e) => (
+                                <button
+                                  key={e}
+                                  onClick={() => {
+                                    reactToMessage(m._id, e);
+                                    setOpenReactionFor(null);
+                                  }}
+                                  className="p-1 text-lg"
+                                >
+                                  {e}
+                                </button>
+                              ))}
+                              <button
+                                onClick={() => setOpenReactionFor(null)}
+                                className="text-xs px-2"
+                              >
+                                Close
+                              </button>
+                            </div>
+                          )}
                         </div>
 
                         {mine && (
@@ -314,6 +566,24 @@ export default function CommunityChat() {
               {/* input area */}
               <div className="mt-4">
                 <div className="bg-gradient-to-r from-white to-white p-3 rounded-xl shadow-md">
+                  {/* Replying preview */}
+                  {replyingTo && (
+                    <div className="mb-2 p-2 rounded-md bg-indigo-50 flex items-center justify-between">
+                      <div className="text-sm">
+                        Replying to <strong>{getUserName(replyingTo)}</strong>:{" "}
+                        <span className="truncate max-w-xs">
+                          {replyingTo.text}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => setReplyingTo(null)}
+                        className="text-xs text-indigo-600"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
@@ -388,39 +658,6 @@ export default function CommunityChat() {
                     </div>
                     <div>{newMessage.length}/500</div>
                   </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* (Optional) Right-side area for participants or info - kept minimal */}
-          <div className="hidden md:block w-64 p-6">
-            <div className="bg-white rounded-xl p-4 shadow">
-              <h3 className="text-sm font-semibold mb-2">Participants</h3>
-              <div className="text-xs text-gray-500 mb-4">
-                Active members in this chat.
-              </div>
-              <div className="space-y-3">
-                <div className="flex items-center gap-3">
-                  <div className="h-8 w-8 rounded-full bg-gradient-to-tr from-pink-500 via-indigo-500 to-purple-500 text-white flex items-center justify-center">
-                    A
-                  </div>
-                  <div className="flex-1 text-sm">Alice</div>
-                  <div className="text-xs text-green-400">●</div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="h-8 w-8 rounded-full bg-gray-300 text-white flex items-center justify-center">
-                    B
-                  </div>
-                  <div className="flex-1 text-sm">Bayo</div>
-                  <div className="text-xs text-green-400">●</div>
-                </div>
-                <div className="flex items-center gap-3 opacity-60">
-                  <div className="h-8 w-8 rounded-full bg-gray-200 text-white flex items-center justify-center">
-                    C
-                  </div>
-                  <div className="flex-1 text-sm">Charles</div>
-                  <div className="text-xs text-gray-300">○</div>
                 </div>
               </div>
             </div>

@@ -1,19 +1,40 @@
-// models/ChatMessage.js
-import mongoose from 'mongoose';
+// backend/models/ChatMessage.js
+import mongoose from "mongoose";
 
-const chatMessageSchema = new mongoose.Schema({
-  user: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
+const reactionSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    emoji: { type: String, required: true },
   },
-  text: {
-    type: String,
-    required: true,
-    trim: true
-  }
-}, {
-  timestamps: true
-});
+  { _id: false }
+);
 
-export default mongoose.model('ChatMessage', chatMessageSchema);
+const chatMessageSchema = new mongoose.Schema(
+  {
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    text: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    replyTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ChatMessage",
+      default: null,
+    },
+    reactions: [reactionSchema],
+  },
+  {
+    timestamps: true,
+  }
+);
+
+export default mongoose.model("ChatMessage", chatMessageSchema);

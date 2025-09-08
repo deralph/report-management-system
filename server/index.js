@@ -1,189 +1,208 @@
-import express from 'express';
-import mongoose from 'mongoose';
-import cors from 'cors';
-import http from 'http';
-import { Server } from 'socket.io';
-import path from 'path';
-import helmet from 'helmet';
-import compression from 'compression';
-import rateLimit from 'express-rate-limit';
-import multer from 'multer';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-import dotenv from 'dotenv';
+// server/index.js (replace your existing file with this or just update the socket handler parts)
+// ... keep your existing imports at the top unchanged
+import express from "express";
+import mongoose from "mongoose";
+import cors from "cors";
+import http from "http";
+import { Server } from "socket.io";
+import path from "path";
+import helmet from "helmet";
+import compression from "compression";
+import rateLimit from "express-rate-limit";
+import multer from "multer";
+import fs from "fs";
+import { fileURLToPath } from "url";
+import { dirname } from "path";
+import dotenv from "dotenv";
 
-// ES module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-// Load environment variables
 dotenv.config();
 
-// Import routes
-import authRoutes from './routes/auth.js';
-import reportRoutes from './routes/report.js';
-import userRoutes from './routes/user.js';
-import chatRoutes from './routes/chat.js';
+import authRoutes from "./routes/auth.js";
+import reportRoutes from "./routes/report.js";
+import userRoutes from "./routes/user.js";
+import chatRoutes from "./routes/chat.js";
+import ChatMessage from "./models/chat.js"; // updated model path
 
-// Import middleware
-import { protect } from './middlewares/auth.js';
+// protect middleware if you use it for HTTP
+import { protect } from "./middlewares/auth.js";
 
-// Import models
-import ChatMessage from './models/chat.js';
+const uploadsDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
-// Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// Initialize express app
 const app = express();
 const server = http.createServer(app);
 
-// Initialize Socket.io
 const io = new Server(server, {
   cors: {
     origin: process.env.CLIENT_URL || "http://localhost:3000",
-    methods: ["GET", "POST"]
-  }
+    methods: ["GET", "POST"],
+  },
 });
 
-// Rate limiting
+// make io available to routes
+app.set("io", io);
+
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
 });
 
-// Middleware
 app.use(helmet());
 app.use(compression());
 app.use(limiter);
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(multer().any()); // For handling file uploads
+app.use(multer().any());
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// Serve uploaded files
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Serve static files in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/build')));
+if (process.env.NODE_ENV === "production") {
+  app.use(express.static(path.join(__dirname, "../client/build")));
 }
 
-// Routes
-app.use('/api/auth', authRoutes);
-console.log('Mounting report routes');
+app.use("/api/auth", authRoutes);
+app.use("/api/reports", reportRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/chat", chatRoutes);
 
-app.use('/api/reports', reportRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/chat', chatRoutes);
+app.get("/api/health", (req, res) =>
+  res.status(200).json({ message: "Server is running!" })
+);
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.status(200).json({ message: 'Server is running!' });
-});
-
-// Serve React app in production
-if (process.env.NODE_ENV === 'production') {
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../client/build/index.html'));
+if (process.env.NODE_ENV === "production") {
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(__dirname, "../client/build/index.html"));
   });
 }
-// WebSocket connection handling
-io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
 
-  // Join a room for general chat
-  socket.join('community-chat');
+/* ---------------------
+   SOCKET.IO HANDLERS
+   --------------------- */
+io.on("connection", (socket) => {
+  console.log("User connected:", socket.id);
+  socket.join("community-chat");
 
-  // Handle new messages
-  socket.on('send-message', async (messageData) => {
+  // typing notifications
+  socket.on("typing", ({ userId, isTyping }) => {
+    io.to("community-chat").emit("user-typing", { userId, isTyping });
+  });
+
+  // send-message (socket)
+  socket.on("send-message", async (messageData, callback) => {
     try {
-      // Save message to database
+      const { userId, text, replyTo } = messageData;
+      if (!userId || !text) {
+        if (typeof callback === "function")
+          callback({ success: false, message: "Invalid payload" });
+        return;
+      }
+
       const message = new ChatMessage({
-        user: messageData.userId,
-        text: messageData.text
+        user: userId,
+        text: text.trim(),
+        replyTo: replyTo || null,
       });
-      
+
       await message.save();
-      await message.populate('user', 'name');
-      
-      // Broadcast the message to all users in the community chat room EXCEPT the sender
-      socket.to('community-chat').emit('receive-message', {
-        _id: message._id,
-        user: message.user.name,
-        userId: message.user._id,
+
+      // CORRECT: await populate directly (Mongoose v6+)
+      await message.populate("user", "name");
+
+      // build payload
+      const payload = {
+        _id: message._id.toString(),
+        user: message.user?.name || message.user,
+        userId: message.user?._id || message.user,
         text: message.text,
-        timestamp: message.createdAt
-      });
-      
-      // Send the message back only to the sender with the correct data
-      socket.emit('receive-message', {
-        _id: message._id,
-        user: message.user.name,
-        userId: message.user._id,
-        text: message.text,
-        timestamp: message.createdAt
-      });
-    } catch (error) {
-      console.error('Error saving chat message:', error);
-      socket.emit('error', { message: 'Failed to send message' });
+        timestamp: message.createdAt,
+        reactions: message.reactions
+          ? message.reactions.map((r) => ({ emoji: r.emoji, userId: r.userId }))
+          : [],
+      };
+
+      if (message.replyTo) {
+        const parent = await ChatMessage.findById(message.replyTo).populate(
+          "user",
+          "name"
+        );
+        payload.replyTo = parent
+          ? {
+              _id: parent._id.toString(),
+              text: parent.text,
+              user: parent.user?.name || parent.user,
+              userId: parent.user?._id || parent.user,
+            }
+          : null;
+      }
+
+      // broadcast
+      socket.to("community-chat").emit("receive-message", payload);
+      socket.emit("receive-message", payload);
+
+      if (typeof callback === "function")
+        callback({ success: true, message: payload });
+    } catch (err) {
+      console.error("Socket send-message error", err);
+      socket.emit("error", { message: "Failed to send message" });
+      if (typeof callback === "function")
+        callback({ success: false, message: "Server error" });
     }
   });
 
-  // Handle disconnection
-  socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+  // react-message (toggle reaction)
+  socket.on("react-message", async ({ messageId, emoji, userId }) => {
+    try {
+      if (!messageId || !emoji || !userId) return;
+      const msg = await ChatMessage.findById(messageId);
+      if (!msg) return;
+
+      const existsIndex = msg.reactions.findIndex(
+        (r) => String(r.userId) === String(userId) && r.emoji === emoji
+      );
+      if (existsIndex > -1) {
+        msg.reactions.splice(existsIndex, 1);
+      } else {
+        msg.reactions.push({ userId, emoji });
+      }
+
+      await msg.save();
+
+      const reactions = msg.reactions.map((r) => ({
+        emoji: r.emoji,
+        userId: r.userId,
+      }));
+      io.to("community-chat").emit("message-reaction-updated", {
+        messageId: msg._id.toString(),
+        reactions,
+      });
+    } catch (err) {
+      console.error("react-message error", err);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected:", socket.id);
   });
 });
 
-// Error handling middleware
+/* error handlers & 404 (unchanged) */
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ 
-    status: 'error', 
-    message: 'Something went wrong!' 
-  });
+  res.status(500).json({ status: "error", message: "Something went wrong!" });
 });
+app.use("*", (req, res) =>
+  res.status(404).json({ status: "error", message: "Route not found" })
+);
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    status: 'error', 
-    message: 'Route not found' 
-  });
-});
+/* connect to mongo & start server (unchanged) */
+const MONGODB_URI =
+  process.env.MONGODB_URI || "mongodb://localhost:27017/aaua-security-system";
+mongoose
+  .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log("Connected to MongoDB"))
+  .catch((err) => console.error("MongoDB connection error:", err));
 
-// MongoDB connection
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/aaua-security-system';
-
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => {
-  console.log('Connected to MongoDB');
-})
-.catch((error) => {
-  console.error('MongoDB connection error:', error);
-});
-
-// Start server
 const PORT = process.env.PORT || 5000;
-
-server.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
-
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('Shutting down gracefully...');
-  await mongoose.connection.close();
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

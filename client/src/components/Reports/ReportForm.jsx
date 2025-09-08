@@ -382,7 +382,7 @@ const ReportForm = ({ editMode = false }) => {
           </div>
 
           <div className="mb-4">
-            <label className="block mb-1">Description *</label>
+            <label className="block mb-1">Incident Details *</label>
             <textarea
               name="description"
               value={formData.description}
