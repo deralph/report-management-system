@@ -108,13 +108,20 @@ export const updateReport = async (req, res) => {
       locationDescription,
     } = req.body;
 
+    // Ensure categories is always an array
+    const categoryArray = Array.isArray(categories)
+      ? categories
+      : categories
+      ? [categories]
+      : [];
+
     // 1️⃣ Update the report
     const report = await Report.findByIdAndUpdate(
       id,
       {
         title,
         description,
-        category: categories,
+        category: categoryArray,
         status,
         area,
         locationDescription,
@@ -131,7 +138,7 @@ export const updateReport = async (req, res) => {
     // 2️⃣ Collect recipient roles
     let recipientRoles = new Set(["admin"]); // always notify admins
 
-    categories.forEach((cat) => {
+    categoryArray.forEach((cat) => {
       for (const role in CATEGORY_ROLES) {
         if (CATEGORY_ROLES[role].includes(cat)) {
           recipientRoles.add(role);
