@@ -4,12 +4,11 @@ import { motion } from "framer-motion";
 import io from "socket.io-client";
 import { useAuth } from "../../context/AuthContext";
 
-// CommunityChat (UI unchanged). Fixes:
-// - dedupe messages properly (no duplicates when sending)
-// - double-click / double-tap opens emoji picker (choose reaction)
-// - single left-click -> reply
-// - long-press (mobile) / right-click -> open emoji picker
-// - swipe-right -> reply
+// CommunityChat with swipe-to-reply and message reactions (interaction updates only)
+// UI retained exactly as you provided; only interaction logic changed:
+// - removed reply arrow icons
+// - desktop: left-click = reply, double-click = quick 👍 react, right-click = open reactions
+// - mobile: swipe right = reply, double-tap = reply, long-press = open reactions
 
 export default function CommunityChat() {
   const { user, api } = useAuth();
@@ -27,7 +26,7 @@ export default function CommunityChat() {
   const socketRef = useRef(null);
   const endRef = useRef(null);
 
-  // gestures / click timing
+  // gesture state
   const touchStartX = useRef(0);
   const touchCurrentX = useRef(0);
   const longPressTimer = useRef(null);
@@ -54,44 +53,6 @@ export default function CommunityChat() {
     return name ? name.charAt(0).toUpperCase() : "U";
   };
 
-  // -----------------------
-  // addOrReplaceMessage helper (dedupe & replace optimistic)
-  // -----------------------
-  const addOrReplaceMessage = useCallback((incoming) => {
-    setMessages((prev) => {
-      const incomingId = String(incoming._id);
-      // 1) If there's an exact id match, replace it
-      const exactIdx = prev.findIndex((m) => String(m._id) === incomingId);
-      if (exactIdx > -1) {
-        const copy = [...prev];
-        copy[exactIdx] = { ...copy[exactIdx], ...incoming };
-        return copy;
-      }
-
-      // 2) Otherwise, try to find an optimistic temp message to replace:
-      //    match on temp id pattern + identical text + same userId + same replyTo (if any)
-      const optimisticIdx = prev.findIndex((m) => {
-        const idStr = String(m._id || "");
-        if (!idStr.startsWith("temp-")) return false;
-        if (String(m.userId) !== String(incoming.userId)) return false;
-        if ((m.text || "") !== (incoming.text || "")) return false;
-        const mReply = m.replyTo ? String(m.replyTo._id || m.replyTo) : null;
-        const inReply = incoming.replyTo
-          ? String(incoming.replyTo._id || incoming.replyTo)
-          : null;
-        return mReply === inReply;
-      });
-      if (optimisticIdx > -1) {
-        const copy = [...prev];
-        copy[optimisticIdx] = { ...copy[optimisticIdx], ...incoming };
-        return copy;
-      }
-
-      // 3) No match -> append
-      return [...prev, incoming];
-    });
-  }, []);
-
   // --- Websocket connect ---
   const connect = useCallback(() => {
     try {
@@ -106,12 +67,19 @@ export default function CommunityChat() {
         setError("");
       });
 
-      // Server broadcasts incoming messages here
       s.on("receive-message", (message) => {
-        // use helper to avoid duplicates
-        addOrReplaceMessage(message);
+        setMessages((prev) => {
+          const exists = prev.some(
+            (msg) => String(msg._id) === String(message._id)
+          );
+          if (!exists) return [...prev, message];
+          return prev.map((m) =>
+            String(m._id) === String(message._id) ? message : m
+          );
+        });
       });
 
+      // Updates to reactions
       s.on("message-reaction-updated", ({ messageId, reactions }) => {
         setMessages((prev) =>
           prev.map((m) =>
@@ -121,7 +89,9 @@ export default function CommunityChat() {
       });
 
       s.on("message-updated", (message) => {
-        addOrReplaceMessage(message);
+        setMessages((prev) =>
+          prev.map((m) => (String(m._id) === String(message._id) ? message : m))
+        );
       });
 
       s.on("user-typing", ({ userId, isTyping }) => {
@@ -144,7 +114,7 @@ export default function CommunityChat() {
       console.error("Socket init error", err);
       setError("Failed to connect to chat server");
     }
-  }, [addOrReplaceMessage]);
+  }, []);
 
   useEffect(() => {
     connect();
@@ -173,9 +143,6 @@ export default function CommunityChat() {
     }
   };
 
-  // -----------------------
-  // sendMessage (optimistic + ack replacement)
-  // -----------------------
   const sendMessage = async () => {
     if (!newMessage.trim()) return;
     const payload = { userId: user._id, text: newMessage.trim() };
@@ -183,6 +150,7 @@ export default function CommunityChat() {
     setNewMessage("");
     setReplyingTo(null);
 
+    // optimistic: create a temporary id & add to UI
     const tempId = `temp-${Date.now()}`;
     const optimisticMsg = {
       _id: tempId,
@@ -201,14 +169,14 @@ export default function CommunityChat() {
       reactions: [],
     };
 
-    // add optimistic message (use helper to avoid doubles)
-    addOrReplaceMessage(optimisticMsg);
+    setMessages((prev) => [...prev, optimisticMsg]);
 
     if (socketRef.current?.connected) {
       socketRef.current.emit("send-message", payload, (ack) => {
         if (ack?.success && ack.message) {
-          // replace optimistic if present (helper will do that)
-          addOrReplaceMessage(ack.message);
+          setMessages((prev) =>
+            prev.map((m) => (m._id === tempId ? ack.message : m))
+          );
         }
       });
     } else {
@@ -216,23 +184,24 @@ export default function CommunityChat() {
         const res = await api.post("/api/chat/messages", payload);
         const saved = res?.data?.data?.message;
         if (saved) {
-          addOrReplaceMessage(saved);
+          setMessages((prev) =>
+            prev.map((m) => (m._id === tempId ? saved : m))
+          );
         } else {
           fetchMessages();
         }
       } catch (err) {
-        console.error("sendMessage error", err);
         setError("Failed to send message");
       }
     }
   };
 
-  // typing + send on enter
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
+    // notify typing
     if (socketRef.current?.connected) {
       socketRef.current.emit("typing", { userId: user._id, isTyping: true });
       clearTimeout(window.__typingTimeout);
@@ -267,6 +236,7 @@ export default function CommunityChat() {
         } else {
           newReactions.push({ emoji, userId: user._id });
         }
+        // emit to server to persist and broadcast
         socketRef.current?.emit("react-message", {
           messageId,
           emoji,
@@ -277,13 +247,14 @@ export default function CommunityChat() {
     );
   };
 
-  // -----------------------
-  // Interaction handlers
-  // -----------------------
-  // Mobile: start touch (start long-press timer for reactions)
+  // --- Interaction handlers: click/double-click (desktop), double-tap/swipe/long-press (mobile) ---
+
+  // Start touch: set start X and start long-press timer (open reactions)
   const onTouchStart = (e, m) => {
     touchStartX.current = e.touches[0].clientX;
     touchCurrentX.current = touchStartX.current;
+
+    // long-press opens reaction picker
     longPressTimer.current = setTimeout(() => {
       setOpenReactionFor(m._id);
     }, 520);
@@ -294,14 +265,16 @@ export default function CommunityChat() {
   const onTouchEnd = (m) => {
     clearTimeout(longPressTimer.current);
     const delta = touchCurrentX.current - touchStartX.current;
+    // swipe right beyond threshold -> reply
     if (delta > 80) {
-      setReplyingTo(m); // swipe-right -> reply
+      setReplyingTo(m);
     } else {
-      // double-tap detection -> open reaction picker
+      // detect double-tap for reply (mobile)
       const now = Date.now();
       const last = lastTapRef.current;
       if (last.id === m._id && now - last.time < 300) {
-        setOpenReactionFor(m._id); // double-tap -> reactions
+        // double-tap -> reply
+        setReplyingTo(m);
         lastTapRef.current = { id: null, time: 0 };
       } else {
         lastTapRef.current = { id: m._id, time: now };
@@ -311,30 +284,31 @@ export default function CommunityChat() {
     touchCurrentX.current = 0;
   };
 
-  // Desktop click vs double-click:
-  // single left-click -> reply
-  // double-click -> open reaction picker (choose emoji)
+  // Desktop: handle click vs double-click distinction for reply vs quick-react
   const handleClick = (m) => {
-    // schedule single-click after short delay; canceled by double-click
+    // schedule single-click (reply) after short delay; if double-click occurs earlier, cancel it
     clearTimeout(clickTimeoutRef.current);
     clickTimeoutRef.current = setTimeout(() => {
       setReplyingTo(m);
     }, 220);
   };
+
   const handleDoubleClick = (m) => {
+    // double-click -> quick toggle a default reaction (thumbs up)
     clearTimeout(clickTimeoutRef.current);
-    setOpenReactionFor(m._id); // double-click -> open reaction picker
+    reactToMessage(m._id, "👍");
   };
 
-  // right-click opens reaction picker
+  // Right-click opens reaction picker (desktop)
   const handleContext = (e, m) => {
     e.preventDefault();
     setOpenReactionFor(m._id);
   };
 
-  // Helper to render reactions inside bubble
+  // Helper to render reaction summary
   const renderReactions = (m) => {
     if (!m.reactions || m.reactions.length === 0) return null;
+    // reduce to emoji => count
     const map = {};
     m.reactions.forEach((r) => (map[r.emoji] = (map[r.emoji] || 0) + 1));
     return (
@@ -364,9 +338,6 @@ export default function CommunityChat() {
     </div>
   );
 
-  // -----------------------
-  // Render (UI unchanged)
-  // -----------------------
   return (
     <div className="mx-auto max-w-4xl p-6">
       <div className="rounded-2xl overflow-hidden shadow-2xl border border-gray-800/5 bg-gradient-to-br from-white via-slate-50 to-white">
@@ -405,162 +376,168 @@ export default function CommunityChat() {
         {/* Body */}
         <div className="flex flex-col md:flex-row ">
           {/* Chat column */}
-          <div className="flex-1 p-6 min-h-[60vh] max-h-[80vh] overflow-hidden">
+          <div className="flex-1 p-6 ">
             <div className="h-full bg-white rounded-xl shadow-inner p-4 flex flex-col">
               {/* messages container */}
-              <div
-                className="flex-1 overflow-y-auto space-y-4 pr-2 bg-cover bg-center bg-no-repeat "
-                style={{
-                  backgroundImage: "url('/chatbg.jpg')",
-                  paddingBottom: 8,
-                }}
-              >
-                {loading ? (
-                  <div className="flex items-center justify-center h-48">
-                    <div className="animate-spin rounded-full h-10 w-10 border-4 border-t-4 border-gray-200"></div>
-                  </div>
-                ) : messages.length === 0 ? (
-                  <div className="flex items-center justify-center h-48 text-gray-400">
-                    No messages yet — say hello 👋
-                  </div>
-                ) : (
-                  messages.map((m, i) => {
-                    const mine = String(getUserId(m)) === String(user._id);
-                    return (
-                      <motion.div
-                        key={String(m._id) + "-" + i}
-                        initial={{ opacity: 0, y: 6 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.18, delay: i * 0.01 }}
-                        className={`flex items-end ${
-                          mine ? "justify-end" : "justify-start"
-                        }`}
-                      >
-                        {!mine && (
-                          <div className="flex-shrink-0 mr-3">
-                            <div className="h-10 w-10 rounded-full bg-gradient-to-tr from-pink-500 via-indigo-500 to-purple-500 flex items-center justify-center text-white font-semibold shadow-lg">
-                              {getInitial(m)}
-                            </div>
-                          </div>
-                        )}
-
-                        <div
-                          className={`max-w-[78%] break-words relative`}
-                          onTouchStart={(e) => onTouchStart(e, m)}
-                          onTouchMove={onTouchMove}
-                          onTouchEnd={() => onTouchEnd(m)}
-                          onClick={() => handleClick(m)}
-                          onDoubleClick={() => handleDoubleClick(m)}
-                          onContextMenu={(e) => handleContext(e, m)}
+              <div className="overflow-y-scroll min-h-[60vh] max-h-[70vh] flex-1">
+                <div
+                  className="flex-1 overflow-y-auto space-y-4 pr-2 bg-cover bg-center bg-no-repeat "
+                  style={{
+                    backgroundImage: "url('/chatbg.jpg')",
+                    paddingBottom: 8,
+                  }}
+                >
+                  {loading ? (
+                    <div className="flex items-center justify-center h-48">
+                      <div className="animate-spin rounded-full h-10 w-10 border-4 border-t-4 border-gray-200"></div>
+                    </div>
+                  ) : messages.length === 0 ? (
+                    <div className="flex items-center justify-center h-48 text-gray-400">
+                      No messages yet — say hello 👋
+                    </div>
+                  ) : (
+                    messages.map((m, i) => {
+                      const mine = getUserId(m) === user._id;
+                      return (
+                        <motion.div
+                          key={String(m._id) + "-" + i}
+                          initial={{ opacity: 0, y: 6 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.18, delay: i * 0.01 }}
+                          className={`flex items-end ${
+                            mine ? "justify-end" : "justify-start"
+                          }`}
                         >
-                          <div
-                            className={`px-4 py-3 rounded-2xl ${
-                              mine
-                                ? "rounded-br-none text-white"
-                                : "rounded-bl-none text-slate-900"
-                            } shadow-md`}
-                            style={{
-                              background: mine
-                                ? "linear-gradient(135deg,#6d28d9,#ec4899)"
-                                : "#f8fafc",
-                            }}
-                          >
-                            {/* reply preview */}
-                            {m.replyTo && (
-                              <div className="mb-2 p-2 rounded-md bg-white/60 text-xs text-gray-600 border-l-2 border-indigo-200">
-                                <div className="font-semibold text-xs">
-                                  Replying to{" "}
-                                  {m.replyTo.user ||
-                                    m.replyTo.user?.name ||
-                                    "Unknown"}
-                                </div>
-                                <div className="truncate max-w-xs">
-                                  {m.replyTo.text}
-                                </div>
+                          {!mine && (
+                            <div className="flex-shrink-0 mr-3">
+                              <div className="h-10 w-10 rounded-full bg-gradient-to-tr from-pink-500 via-indigo-500 to-purple-500 flex items-center justify-center text-white font-semibold shadow-lg">
+                                {getInitial(m)}
                               </div>
-                            )}
-
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-3">
-                                {!mine && (
-                                  <div className="text-sm font-semibold">
-                                    {getUserName(m)}
-                                  </div>
-                                )}
-                                <div
-                                  className={`text-xs ${
-                                    mine ? "text-white/90" : "text-gray-500"
-                                  }`}
-                                >
-                                  {formatTime(
-                                    m.updatedAt || m.createdAt || m.timestamp
-                                  )}
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-2" />
-                            </div>
-
-                            <div
-                              className={`mt-1 text-sm ${
-                                mine ? "text-white" : "text-slate-800"
-                              }`}
-                            >
-                              {m.text}
-                            </div>
-
-                            {renderReactions(m)}
-                          </div>
-
-                          {/* Reaction picker popover */}
-                          {openReactionFor === m._id && (
-                            <div className="absolute right-0 top-0 mt-2 bg-white rounded-lg shadow p-2 flex gap-2 z-50">
-                              {EMOJIS.map((e) => (
-                                <button
-                                  key={e}
-                                  onClick={() => {
-                                    reactToMessage(m._id, e);
-                                    setOpenReactionFor(null);
-                                  }}
-                                  className="p-1 text-lg"
-                                >
-                                  {e}
-                                </button>
-                              ))}
-                              <button
-                                onClick={() => setOpenReactionFor(null)}
-                                className="text-xs px-2"
-                              >
-                                Close
-                              </button>
                             </div>
                           )}
-                        </div>
 
-                        {mine && (
-                          <div className="flex-shrink-0 ml-3">
-                            <div className="h-8 w-8 rounded-full bg-gradient-to-tr from-blue-400 to-green-400 flex items-center justify-center text-white font-medium shadow">
-                              {getInitial(m)}
+                          <div
+                            className={`max-w-[78%] break-words relative`}
+                            onTouchStart={(e) => onTouchStart(e, m)}
+                            onTouchMove={onTouchMove}
+                            onTouchEnd={() => onTouchEnd(m)}
+                            onClick={() => handleClick(m)}
+                            onDoubleClick={() => handleDoubleClick(m)}
+                            onContextMenu={(e) => handleContext(e, m)}
+                          >
+                            {/* NOTE: removed the left reply/react icons here (per request) */}
+
+                            <div
+                              className={`px-4 py-3 rounded-2xl ${
+                                mine
+                                  ? "rounded-br-none text-white"
+                                  : "rounded-bl-none text-slate-900"
+                              } shadow-md`}
+                              style={{
+                                background: mine
+                                  ? "linear-gradient(135deg,#6d28d9,#ec4899)"
+                                  : "#f8fafc",
+                              }}
+                            >
+                              {/* reply preview */}
+                              {m.replyTo && (
+                                <div className="mb-2 p-2 rounded-md bg-white/60 text-xs text-gray-600 border-l-2 border-indigo-200">
+                                  <div className="font-semibold text-xs">
+                                    Replying to{" "}
+                                    {m.replyTo.user ||
+                                      m.replyTo.user?.name ||
+                                      "Unknown"}
+                                  </div>
+                                  <div className="truncate max-w-xs">
+                                    {m.replyTo.text}
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-3">
+                                  {!mine && (
+                                    <div className="text-sm font-semibold">
+                                      {getUserName(m)}
+                                    </div>
+                                  )}
+                                  <div
+                                    className={`text-xs ${
+                                      mine ? "text-white/90" : "text-gray-500"
+                                    }`}
+                                  >
+                                    {formatTime(
+                                      m.updatedAt || m.createdAt || m.timestamp
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  {/* small reaction opener for mobile removed to rely on long-press */}
+                                </div>
+                              </div>
+
+                              <div
+                                className={`mt-1 text-sm ${
+                                  mine ? "text-white" : "text-slate-800"
+                                }`}
+                              >
+                                {m.text}
+                              </div>
+
+                              {renderReactions(m)}
                             </div>
+
+                            {/* Reaction picker popover (opens via long-press or right-click or when openReactionFor === id) */}
+                            {openReactionFor === m._id && (
+                              <div className="absolute right-0 top-0 mt-2 bg-white rounded-lg shadow p-2 flex gap-2 z-50">
+                                {EMOJIS.map((e) => (
+                                  <button
+                                    key={e}
+                                    onClick={() => {
+                                      reactToMessage(m._id, e);
+                                      setOpenReactionFor(null);
+                                    }}
+                                    className="p-1 text-lg"
+                                  >
+                                    {e}
+                                  </button>
+                                ))}
+                                <button
+                                  onClick={() => setOpenReactionFor(null)}
+                                  className="text-xs px-2"
+                                >
+                                  Close
+                                </button>
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </motion.div>
-                    );
-                  })
-                )}
 
-                {/* typing indicator */}
-                {typingUsers.length > 0 && (
-                  <div className="flex items-center gap-2 text-sm text-gray-400">
-                    <div className="h-2 w-2 rounded-full bg-gray-300 animate-pulse" />
-                    <div>
-                      {typingUsers.length > 1
-                        ? "Multiple people are typing..."
-                        : "Someone is typing..."}
+                          {mine && (
+                            <div className="flex-shrink-0 ml-3">
+                              <div className="h-8 w-8 rounded-full bg-gradient-to-tr from-blue-400 to-green-400 flex items-center justify-center text-white font-medium shadow">
+                                {getInitial(m)}
+                              </div>
+                            </div>
+                          )}
+                        </motion.div>
+                      );
+                    })
+                  )}
+
+                  {/* typing indicator */}
+                  {typingUsers.length > 0 && (
+                    <div className="flex items-center gap-2 text-sm text-gray-400">
+                      <div className="h-2 w-2 rounded-full bg-gray-300 animate-pulse" />
+                      <div>
+                        {typingUsers.length > 1
+                          ? "Multiple people are typing..."
+                          : "Someone is typing..."}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                <div ref={endRef} />
+                  <div ref={endRef} />
+                </div>
               </div>
 
               {/* input area */}
