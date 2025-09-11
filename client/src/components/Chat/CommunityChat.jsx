@@ -466,7 +466,7 @@ export default function CommunityChat() {
                           )}
 
                         <div
-                          className={`max-w-[85%] md:max-w-[80%] break-words relative`} // Increased max-width
+                          className={`w-[80%] md:w-[75%] break-words relative`} // Increased max-width
                           onTouchStart={(e) => onTouchStart(e, m)}
                           onTouchMove={onTouchMove}
                           onTouchEnd={() => onTouchEnd(m)}
