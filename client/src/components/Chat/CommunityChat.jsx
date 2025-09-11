@@ -425,7 +425,7 @@ export default function CommunityChat() {
               {/* messages container */}
               <div
                 ref={messagesContainerRef}
-                className="flex-1 overflow-y-scroll max-h-[80vh] space-y-4 pr-2 bg-cover bg-center bg-no-repeat"
+                className="flex-1 overflow-y-scroll max-h-[80vh] space-y-4 p-2 bg-cover bg-center bg-no-repeat"
                 style={{
                   backgroundImage: "url('/chatbg.jpg')",
                   paddingBottom: 8,
@@ -466,7 +466,7 @@ export default function CommunityChat() {
                           )}
 
                         <div
-                          className={`w-[80%] md:w-[75%] break-words relative`} // Increased max-width
+                          className={`w-full  break-words relative`} // Increased max-width
                           onTouchStart={(e) => onTouchStart(e, m)}
                           onTouchMove={onTouchMove}
                           onTouchEnd={() => onTouchEnd(m)}

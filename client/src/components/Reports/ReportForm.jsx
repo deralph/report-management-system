@@ -31,6 +31,19 @@ const ReportForm = ({ editMode = false }) => {
   const [cloudinaryReady, setCloudinaryReady] = useState(false);
   const [widgetLoadError, setWidgetLoadError] = useState("");
 
+  // Category options
+  const CATEGORY_OPTIONS = [
+    { value: "theft", label: "Theft & Burglary" },
+    { value: "assault", label: "Physical Assault & Harassment" },
+    { value: "fire", label: "Fire Outbreak" },
+    { value: "medical", label: "Medical Emergency" },
+    { value: "vandalism", label: "Vandalism & Property Damage" },
+    { value: "substance", label: "Substance Abuse & Misconduct" },
+    { value: "unauthorized", label: "Unauthorized Access or Trespassing" },
+    { value: "environmental", label: "Environmental Hazard" },
+    { value: "protest", label: "Protest & Public Disturbance" },
+  ];
+
   // --- Cloudinary script loader ---
   const loadCloudinaryScript = () => {
     return new Promise((resolve, reject) => {
@@ -144,8 +157,32 @@ const ReportForm = ({ editMode = false }) => {
   };
 
   const handleCategoryChange = (e) => {
-    const selected = Array.from(e.target.selectedOptions, (opt) => opt.value);
-    setFormData((prev) => ({ ...prev, categories: selected }));
+    const { value, checked } = e.target;
+    
+    setFormData((prev) => {
+      if (checked) {
+        // Add category if checked and not already in the list
+        return {
+          ...prev,
+          categories: prev.categories.includes(value) 
+            ? prev.categories 
+            : [...prev.categories, value]
+        };
+      } else {
+        // Remove category if unchecked
+        return {
+          ...prev,
+          categories: prev.categories.filter(cat => cat !== value)
+        };
+      }
+    });
+  };
+
+  const removeCategory = (categoryToRemove) => {
+    setFormData(prev => ({
+      ...prev,
+      categories: prev.categories.filter(cat => cat !== categoryToRemove)
+    }));
   };
 
   const getCurrentLocation = () => {
@@ -323,36 +360,45 @@ const ReportForm = ({ editMode = false }) => {
 
           <div className="mb-4">
             <label className="block mb-1">Category *</label>
-            <select
-              name="categories"
-              multiple
-              value={formData.categories}
-              onChange={handleCategoryChange}
-              required
-              className="w-full border rounded px-3 py-2 h-32"
-            >
-              {[
-                { value: "theft", label: "Theft & Burglary" },
-                { value: "assault", label: "Physical Assault & Harassment" },
-                { value: "fire", label: "Fire Outbreak" },
-                { value: "medical", label: "Medical Emergency" },
-                { value: "vandalism", label: "Vandalism & Property Damage" },
-                { value: "substance", label: "Substance Abuse & Misconduct" },
-                {
-                  value: "unauthorized",
-                  label: "Unauthorized Access or Trespassing",
-                },
-                { value: "environmental", label: "Environmental Hazard" },
-                { value: "protest", label: "Protest & Public Disturbance" },
-              ].map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
+            
+            {/* Display selected categories as tags */}
+            {formData.categories.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {formData.categories.map(category => {
+                  const option = CATEGORY_OPTIONS.find(opt => opt.value === category);
+                  return (
+                    <span 
+                      key={category} 
+                      className="bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded flex items-center"
+                    >
+                      {option?.label || category}
+                      <button 
+                        type="button" 
+                        onClick={() => removeCategory(category)}
+                        className="ml-1 text-blue-800 hover:text-blue-900"
+                      >
+                        &times;
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {CATEGORY_OPTIONS.map(option => (
+                <label key={option.value} className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    value={option.value}
+                    checked={formData.categories.includes(option.value)}
+                    onChange={handleCategoryChange}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>{option.label}</span>
+                </label>
               ))}
-            </select>
-            <p className="text-sm text-gray-500 mt-1">
-              Hold Ctrl (Cmd on Mac) to select multiple
-            </p>
+            </div>
           </div>
 
           <div className="mb-4">
