@@ -364,7 +364,7 @@ const ReportForm = ({ editMode = false }) => {
               onChange={handleChange}
               required
               className="w-full border rounded px-3 py-2"
-              placeholder="E.g. Library Block A, Hostel Zone 2"
+              placeholder="Eg -  area/hostel name/closest landmarks"
             />
           </div>
 
@@ -390,7 +390,7 @@ const ReportForm = ({ editMode = false }) => {
               required
               rows={5}
               className="w-full border rounded px-3 py-2"
-              placeholder="Provide details (time, people involved, etc.)"
+              placeholder="Provide details (brief explanation of what's going on)"
             />
           </div>
 

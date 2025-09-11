@@ -3,11 +3,44 @@ import { cloudinary } from "../utils/cloudinary.js";
 import Report from "../models/Report.js"; // assuming path
 import nodemailer from "nodemailer";
 import User from "../models/User.js";
+import ChatMessage from "../models/chat.js";
 
 const CATEGORY_ROLES = {
   security: ["theft", "assault", "vandalism", "unauthorized", "protest"],
   medical: ["medical"],
   special: ["fire", "environmental", "substance"],
+};
+
+const messageSystem = async (report, req, isUpdate) => {
+  // Send system message to chat
+  const systemUser = await User.findOne({ email: "davisheddie@gmail.com" });
+  if (systemUser) {
+    const messageText = `Case ${report._id}: ${report.title} has been ${
+      isUpdate ? "updated" : "created"
+    }. Status: ${report.status}`;
+
+    const systemMessage = new ChatMessage({
+      user: systemUser._id,
+      text: messageText,
+    });
+
+    await systemMessage.save();
+    await systemMessage.populate("user", "name");
+
+    const io = req.app.get("io");
+    if (io) {
+      const payload = {
+        _id: systemMessage._id.toString(),
+        user: systemMessage.user.name,
+        userId: systemMessage.user._id,
+        text: systemMessage.text,
+        timestamp: systemMessage.createdAt,
+        reactions: [],
+      };
+
+      io.to("community-chat").emit("receive-message", payload);
+    }
+  }
 };
 
 export const createReport = async (req, res) => {
@@ -40,7 +73,7 @@ export const createReport = async (req, res) => {
       image,
       createdBy: userId,
     });
-
+    await messageSystem(newReport, req, false);
     // 2️⃣ Collect recipients
     let recipientRoles = new Set(["admin"]); // admins always notified
 
@@ -134,7 +167,7 @@ export const updateReport = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Report not found" });
     }
-
+    await messageSystem(report, req, true);
     // 2️⃣ Collect recipient roles
     let recipientRoles = new Set(["admin"]); // always notify admins
 

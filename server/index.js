@@ -78,8 +78,8 @@ if (process.env.NODE_ENV === "production") {
 }
 
 /* ---------------------
-   SOCKET.IO HANDLERS
-   --------------------- */
+    SOCKET.IO HANDLERS
+    --------------------- */
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
   socket.join("community-chat");
