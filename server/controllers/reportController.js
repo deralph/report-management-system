@@ -15,9 +15,9 @@ const messageSystem = async (report, req, isUpdate) => {
   // Send system message to chat
   const systemUser = await User.findOne({ email: "davisheddie@gmail.com" });
   if (systemUser) {
-    const messageText = `Case ${report._id}: ${report.title} has been ${
-      isUpdate ? "updated" : "created"
-    }. Status: ${report.status}`;
+    const messageText = `Case ${report.category.join(" || ")}: ${
+      report.title
+    } has been ${isUpdate ? "updated" : "created"}. Status: ${report.status}`;
 
     const systemMessage = new ChatMessage({
       user: systemUser._id,
